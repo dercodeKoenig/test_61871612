@@ -1,7 +1,8 @@
 # needs python 3.10
+# also install the nvidia-driver5xx, not server, rtx5090 may need -open version
 
 sudo apt update -y
-sudo apt install python3.10 python3.10-venv python3.10-dev -y
+sudo apt install python3.10 python3.10-venv python3.10-dev unzip -y
 python3.10 -m venv .venv
 
 .venv/bin/python -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
