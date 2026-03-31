@@ -5,10 +5,16 @@ sudo apt update -y
 sudo apt install python3.10 python3.10-venv python3.10-dev unzip -y
 python3.10 -m venv .venv
 
+# update pip
+.venv/bin/python -m pip install --upgrade pip
+
+# install correct torch version first
 .venv/bin/python -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
 
+# prepare for building requirements
 .venv/bin/python -m pip install wheel setuptools
 
+# install requirements
 .venv/bin/python -m pip install -r requirements.txt
 
 
@@ -22,8 +28,7 @@ sudo apt-get -y install cuda-toolkit-12-8
 export TORCH_CUDA_ARCH_LIST="12.0"  
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=/usr/local/cuda-12.8/bin:$PATH
-.venv/bin/python -m pip install -v --no-build-isolation -U git+https://github.com/facebookresearch/xformers.git@main#egg=xformers
-
+.venv/bin/python -m pip install --no-build-isolation --no-cache-dir git+https://github.com/dercodeKoenig/xformers
 
 #huggingface-cli download liuhaotian/llava-v1.5-13b --local-dir llava-v1.5-13b --local-dir-use-symlinks False
 wget https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0_0.9vae.safetensors

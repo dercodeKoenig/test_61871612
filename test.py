@@ -1,105 +1,84 @@
-import torch.cuda
-import argparse
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import math
+import queue
+import random
+import threading
+import time
+from io import BytesIO
+import numpy as np
+import cv2
+import requests
+from queue import Queue
+import torch
 from SUPIR.util import create_SUPIR_model, PIL2Tensor, Tensor2PIL, convert_dtype
 from PIL import Image
-from llava.llava_agent import LLavaAgent
-from CKPT_PTH import LLAVA_MODEL_PATH
-import os
-from torch.nn.functional import interpolate
-import math
+import gc
 
-# hyparams here
-parser = argparse.ArgumentParser()
-parser.add_argument("--img_dir", type=str)
-parser.add_argument("--save_dir", type=str)
-parser.add_argument("--upscale", type=int, default=1)
-parser.add_argument("--SUPIR_sign", type=str, default='Q', choices=['F', 'Q'])
-parser.add_argument("--seed", type=int, default=1234)
-parser.add_argument("--min_size", type=int, default=512)
-parser.add_argument("--edm_steps", type=int, default=70)
-parser.add_argument("--s_stage1", type=int, default=-1)
-parser.add_argument("--s_churn", type=int, default=5)
-parser.add_argument("--s_noise", type=float, default=1.01)
-parser.add_argument("--s_cfg", type=float, default=4.0)
-parser.add_argument("--s_stage2", type=float, default=1.0)
-parser.add_argument("--num_samples", type=int, default=1)
-parser.add_argument("--a_prompt", type=str,
-                    default='Cinematic, High Contrast, highly detailed, taken using a Canon EOS R '
-                            'camera, hyper detailed photo - realistic maximum detail, 32k, Color '
-                            'Grading, ultra HD, extreme meticulous detailing, skin pore detailing, '
-                            'hyper sharpness, perfect without deformations.')
-parser.add_argument("--n_prompt", type=str,
-                    default='painting, oil painting, illustration, drawing, art, sketch, oil painting, '
-                            'cartoon, CG Style, 3D render, unreal engine, blurring, dirty, messy, '
-                            'worst quality, low quality, frames, watermark, signature, jpeg artifacts, '
-                            'deformed, lowres, over-smooth')
-parser.add_argument("--color_fix_type", type=str, default='Wavelet', choices=["None", "AdaIn", "Wavelet"])
-parser.add_argument("--linear_CFG", action='store_true', default=True)
-parser.add_argument("--linear_s_stage2", action='store_true', default=False)
-parser.add_argument("--spt_linear_CFG", type=float, default=1.0)
-parser.add_argument("--spt_linear_s_stage2", type=float, default=0.)
-parser.add_argument("--ae_dtype", type=str, default="bf16", choices=['fp32', 'bf16'])
-parser.add_argument("--diff_dtype", type=str, default="fp16", choices=['fp32', 'fp16', 'bf16'])
-parser.add_argument("--use_llava", action='store_true', default=False)
-parser.add_argument("--use_tile_vae", action='store_true', default=False)
-parser.add_argument("--encoder_tile_size", type=int, default=512)
-parser.add_argument("--decoder_tile_size", type=int, default=64)
-args = parser.parse_args()
-print(args)
-use_llava = args.use_llava
 
-# load SUPIR
-model = create_SUPIR_model('options/SUPIR_v0.yaml', SUPIR_sign=args.SUPIR_sign)
-model = model.half()
-if args.use_tile_vae:
-    model.init_tile_vae(encoder_tile_size=args.encoder_tile_size, decoder_tile_size=args.decoder_tile_size)
-model.ae_dtype = convert_dtype(args.ae_dtype)
-model.model.dtype = convert_dtype(args.diff_dtype)
+model = create_SUPIR_model('options/SUPIR_v0_tiled.yaml', SUPIR_sign="Q")
+model.half()
+model.ae_dtype = convert_dtype("bf16")
+model.model.dtype = convert_dtype("fp16")
+model.init_tile_vae(encoder_tile_size=3072, decoder_tile_size=192)
 model.to("cuda")
-
-# load LLaVA
-if use_llava:
-    llava_agent = LLavaAgent(LLAVA_MODEL_PATH, device="cuda", load_8bit=True)
-else:
-    llava_agent = None
-
-os.makedirs(args.save_dir, exist_ok=True)
-for img_pth in os.listdir(args.img_dir):
-    img_name = os.path.splitext(img_pth)[0]
+print("SUPIR model loaded successfully!")
 
 
-    LQ_ips = Image.open(os.path.join(args.img_dir, img_pth))
-    
-    scale = args.upscale
-    if scale < 0:
-                img_size  = LQ_ips.width * LQ_ips.height
-                target_size = -scale * -scale
-                scale = math.sqrt(target_size / img_size)
-    
-    LQ_img, h0, w0 = PIL2Tensor(LQ_ips, upsacle=scale, min_size=args.min_size)
-    LQ_img = LQ_img.unsqueeze(0).to("cuda")[:, :3, :, :]
 
-    # step 1: Pre-denoise for LLaVA, resize to 512
-    LQ_img_512, h1, w1 = PIL2Tensor(LQ_ips, upsacle=scale, min_size=args.min_size, fix_resize=512)
-    LQ_img_512 = LQ_img_512.unsqueeze(0).to("cuda")[:, :3, :, :]
-    clean_imgs = model.batchify_denoise(LQ_img_512)
-    clean_PIL_img = Tensor2PIL(clean_imgs[0], h1, w1)
 
-    # step 2: LLaVA
-    if use_llava:
-        captions = llava_agent.gen_image_caption([clean_PIL_img])
-    else:
-        captions = ['']
-    print(captions, LQ_img.shape, scale)
-    
-    # # step 3: Diffusion Process
-    samples = model.batchify_sample(LQ_img, captions, num_steps=args.edm_steps, restoration_scale=args.s_stage1, s_churn=args.s_churn,
-                                    s_noise=args.s_noise, cfg_scale=args.s_cfg, control_scale=args.s_stage2, seed=args.seed,
-                                    num_samples=args.num_samples, p_p=args.a_prompt, n_p=args.n_prompt, color_fix_type=args.color_fix_type,
-                                    use_linear_CFG=args.linear_CFG, use_linear_control_scale=args.linear_s_stage2,
-                                    cfg_scale_start=args.spt_linear_CFG, control_scale_start=args.spt_linear_s_stage2)
-    
-    # save
-    for _i, sample in enumerate(samples):
-        Tensor2PIL(sample, h0, w0).save(f'{args.save_dir}/{img_name}_{_i}.png')
+img = Image.open("baboon.png")
+img = img.convert("RGB")
 
+img_size = img.width * img.height
+target_size = 4096 * 4096
+scale = math.sqrt(target_size / img_size)
+
+
+LQ_ips = img
+LQ_img, h0, w0 = PIL2Tensor(LQ_ips, scale, min_size=512)
+LQ_img = LQ_img.unsqueeze(0).to("cuda")[:, :3, :, :]
+
+captions = [""]
+
+# Diffusion Process
+print(img.size, scale, LQ_img.shape, captions)
+
+extra_creativity = 0.1
+control_scale = 1.0 - 0.2 * extra_creativity
+cfg_scale = 2.0 + 6.0 * extra_creativity
+s_noise = 0.98 + 0.04 * extra_creativity
+cfg_scale_start = 1.0 + 2.0 * extra_creativity
+
+t1 = time.time()
+
+with torch.no_grad():
+    samples = model.batchify_sample(
+        LQ_img,
+        captions,
+        num_steps=6,
+        restoration_scale=-1,
+        s_churn=0,
+        s_noise=s_noise,
+        cfg_scale=cfg_scale,
+        control_scale=control_scale,
+        seed=random.randint(0, 999999),
+        num_samples=1,
+        p_p='clean, high quality, detailed',
+        n_p='bad quality, blurry, deformed, noise, grainy, distorted, malformed hands, extra limbs, missing limbs, bad anatomy',
+        color_fix_type='Wavelet',
+        use_linear_CFG=True,
+        use_linear_control_scale=False,
+        cfg_scale_start=cfg_scale_start,
+        control_scale_start=0
+    )
+
+
+t2 = time.time()
+print("upscale done:", t2-t1)
+
+# Convert tensor back to PIL
+upscaled = Tensor2PIL(samples[0], h0, w0)
+
+upscaled.save("upscaled.png")
