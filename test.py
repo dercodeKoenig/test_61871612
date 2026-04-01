@@ -28,11 +28,12 @@ print("SUPIR model loaded successfully!")
 
 
 
-img = Image.open("baboon.png")
+#img = Image.open("baboon.png")
+img = Image.open("test2.jpg")
 img = img.convert("RGB")
 
 img_size = img.width * img.height
-target_size = 4096 * 4096
+target_size = 2000 * 2000
 scale = math.sqrt(target_size / img_size)
 
 
@@ -57,7 +58,7 @@ with torch.no_grad():
     samples = model.batchify_sample(
         LQ_img,
         captions,
-        num_steps=6,
+        num_steps=32,
         restoration_scale=-1,
         s_churn=0,
         s_noise=s_noise,
@@ -66,7 +67,7 @@ with torch.no_grad():
         seed=random.randint(0, 999999),
         num_samples=1,
         p_p='clean, high quality, detailed',
-        n_p='bad quality, blurry, deformed, noise, grainy, distorted, malformed hands, extra limbs, missing limbs, bad anatomy',
+        n_p='bad quality, blurry, deformed, noise, grainy',
         color_fix_type='Wavelet',
         use_linear_CFG=True,
         use_linear_control_scale=False,
